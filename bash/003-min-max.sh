@@ -12,6 +12,11 @@ for index in {1..20}; do
             continue
         fi
 
+        if [[ $index -eq 1 ]]; then
+            min_number=$number
+            max_number=$number
+        fi
+
         if [[ $number -gt $max_number ]]; then
             max_number=$number
         fi
