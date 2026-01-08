@@ -1,0 +1,17 @@
+services:
+  ubuntu-ssh:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        USERNAME: ${USERNAME:-test}
+        PASSWORD: ${PASSWORD:-test}
+    container_name: ubuntu-ssh
+    restart: unless-stopped
+    ports:
+      - "22022:22"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
