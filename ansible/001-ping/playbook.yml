@@ -1,0 +1,10 @@
+- name: Ping all hosts
+  hosts: all
+  tasks:
+    - name: Ping hosts
+      ansible.builtin.ping:
+      register: ping_result
+
+    - name: Show result
+      ansible.builtin.debug:
+        var: ping_result

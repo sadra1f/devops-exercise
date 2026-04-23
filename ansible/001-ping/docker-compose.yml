@@ -1,0 +1,17 @@
+services:
+  ubuntu-ssh-1: &ubuntu-ssh-base
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APT_MIRROR: "${APT_MIRROR:-}"
+    container_name: ubuntu-ssh-1
+    ports:
+      - "22022:22"
+    restart: unless-stopped
+
+  ubuntu-ssh-2:
+    <<: *ubuntu-ssh-base
+    container_name: ubuntu-ssh-2
+    ports:
+      - "22023:22"
