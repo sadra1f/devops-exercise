@@ -1,0 +1,310 @@
+# TODO: WIP Not tested properly!
+
+- name: Install Kubernetes on Ubuntu 24.04
+  hosts: all
+  become: yes
+  vars_prompt:
+    - name: go_path
+      prompt: "Enter path to Golang binaries tar.gz"
+      private: no
+    - name: kubernetes_source_path
+      prompt: "Enter path to Kubernetes binaries tar.gz"
+      private: no
+    - name: cni_plugins_path
+      prompt: "Enter path to CNI plugins tar.gz"
+      private: no
+    - name: containerd_path
+      prompt: "Enter path to containerd tar.gz"
+      private: no
+    - name: runc_path
+      prompt: "Enter path to runc binary"
+      private: no
+  environment:
+    GOPATH: /tmp/go
+    FORCE_HOST_GO: "y"
+    PATH: "/usr/local/go/bin:{{ ansible_env.PATH }}"
+
+  tasks:
+    # Disable swap
+    - name: Disable swap
+      ansible.builtin.command: swapoff -a
+      when: ansible_swaptotal_mb > 0
+
+    - name: Remove swap from /etc/fstab
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([^#].*?\sswap\s+sw\s+.*)$'
+        replace: '# \1'
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    # Install and config requirements
+    - name: Install required packages
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - socat
+          - conntrack
+          - ipset
+          - libseccomp2
+          - unzip
+          - build-essential
+          - git
+          - rsync
+        state: present
+
+    - name: Install Go
+      ansible.builtin.unarchive:
+        src: "{{ go_path }}"
+        dest: /usr/local
+        extra_opts:
+          - --strip-components=1
+
+    - name: Load required kernel modules
+      ansible.builtin.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: Ensure kernel modules load on boot
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+        mode: "0644"
+
+    - name: Set sysctl parameters for Kubernetes
+      ansible.posix.sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        sysctl_file: /etc/sysctl.d/k8s.conf
+        reload: yes
+      loop:
+        - { name: "net.bridge.bridge-nf-call-iptables", value: "1" }
+        - { name: "net.bridge.bridge-nf-call-ip6tables", value: "1" }
+        - { name: "net.ipv4.ip_forward", value: "1" }
+
+    # Install runc
+    - name: Install runc
+      ansible.builtin.copy:
+        src: "{{ runc_path }}"
+        dest: /usr/local/sbin/runc
+        mode: "0755"
+
+    # Install CNI plugins
+    - name: Create CNI bin directory
+      ansible.builtin.file:
+        path: /opt/cni/bin
+        state: directory
+        mode: "0755"
+
+    - name: Create CNI config directory
+      ansible.builtin.file:
+        path: /etc/cni/net.d
+        state: directory
+        mode: "0755"
+
+    - name: Extract CNI plugins
+      ansible.builtin.unarchive:
+        src: "{{ cni_plugins_path }}"
+        dest: /opt/cni/bin
+
+    - name: Set CNI plugin permissions
+      ansible.builtin.file:
+        path: /opt/cni/bin
+        state: directory
+        recurse: yes
+        mode: "0755"
+
+    # Install containerd
+    - name: Extract containerd binaries
+      ansible.builtin.unarchive:
+        src: "{{ containerd_path }}"
+        dest: /usr/local
+        extra_opts:
+          - --strip-components=1
+
+    - name: Create containerd config directory
+      ansible.builtin.file:
+        path: /etc/containerd
+        state: directory
+        mode: "0755"
+
+    - name: Generate default containerd config
+      ansible.builtin.shell: containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+
+    - name: Configure containerd to use systemd cgroup driver
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: '(\s+)SystemdCgroup = false'
+        replace: '\1SystemdCgroup = true'
+
+    - name: Create containerd systemd service file
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/containerd.service
+        content: |
+          [Unit]
+          Description=containerd container runtime
+          Documentation=https://containerd.io
+          After=network.target local-fs.target
+
+          [Service]
+          ExecStartPre=-/sbin/modprobe overlay
+          ExecStart=/usr/local/bin/containerd
+          Type=notify
+          Delegate=yes
+          KillMode=process
+          Restart=always
+          RestartSec=5
+          LimitNPROC=infinity
+          LimitCORE=infinity
+          LimitNOFILE=infinity
+          TasksMax=infinity
+          OOMScoreAdjust=-999
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: "0644"
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Enable and start containerd
+      ansible.builtin.systemd:
+        name: containerd
+        enabled: yes
+        state: started
+
+    - name: Wait for containerd socket
+      ansible.builtin.wait_for:
+        path: /run/containerd/containerd.sock
+        timeout: 120
+
+    # Install Kubernetes binaries
+    - name: Check Go version
+      ansible.builtin.command: go version
+      register: go_version
+      changed_when: false
+
+    - name: Create Kubernetes build directory
+      ansible.builtin.file:
+        path: /tmp/kubernetes-build
+        state: directory
+        mode: "0755"
+
+    - name: Extract Kubernetes source
+      ansible.builtin.unarchive:
+        src: "{{ kubernetes_source_path }}"
+        dest: /tmp/kubernetes-build
+
+    - name: Find Kubernetes source directory
+      ansible.builtin.find:
+        paths: /tmp/kubernetes-build
+        file_type: directory
+        recurse: no
+      register: k8s_source_dir
+
+    - name: Set Kubernetes source path fact
+      ansible.builtin.set_fact:
+        k8s_src: "{{ k8s_source_dir.files[0].path }}"
+
+    - name: Build kubeadm
+      ansible.builtin.command:
+        cmd: make WHAT=cmd/kubeadm
+        chdir: "{{ k8s_src }}"
+      register: build_kubeadm
+      changed_when: build_kubeadm.rc == 0
+
+    - name: Build kubelet
+      ansible.builtin.command:
+        cmd: make WHAT=cmd/kubelet
+        chdir: "{{ k8s_src }}"
+      register: build_kubelet
+      changed_when: build_kubelet.rc == 0
+
+    - name: Build kubectl
+      ansible.builtin.command:
+        cmd: make WHAT=cmd/kubectl
+        chdir: "{{ k8s_src }}"
+      register: build_kubectl
+      changed_when: build_kubectl.rc == 0
+
+    - name: Build kube-proxy
+      ansible.builtin.command:
+        cmd: make WHAT=cmd/kube-proxy
+        chdir: "{{ k8s_src }}"
+      register: build_kube_proxy
+      changed_when: build_kube_proxy.rc == 0
+
+    - name: Install Kubernetes binaries
+      ansible.builtin.copy:
+        src: "{{ k8s_src }}/_output/bin/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        mode: "0755"
+        remote_src: yes
+      loop:
+        - kubeadm
+        - kubelet
+        - kubectl
+        - kube-proxy
+
+    - name: Create kubelet service directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/kubelet.service.d
+        state: directory
+        mode: "0755"
+
+    - name: Create kubelet service file
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/kubelet.service
+        content: |
+          [Unit]
+          Description=kubelet: The Kubernetes Node Agent
+          Documentation=https://kubernetes.io/docs/
+          Wants=network-online.target
+          After=network-online.target
+
+          [Service]
+          ExecStart=/usr/local/bin/kubelet
+          Restart=always
+          StartLimitInterval=0
+          RestartSec=10
+
+          [Install]
+          WantedBy=multi-user.target
+        mode: "0644"
+
+    - name: Create kubeadm drop-in configuration
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+        content: |
+          [Service]
+          Environment="KUBELET_KUBECONFIG_ARGS=--bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf --kubeconfig=/etc/kubernetes/kubelet.conf"
+          Environment="KUBELET_CONFIG_ARGS=--config=/var/lib/kubelet/config.yaml"
+          EnvironmentFile=-/var/lib/kubelet/kubeadm-flags.env
+          EnvironmentFile=-/etc/default/kubelet
+          ExecStart=
+          ExecStart=/usr/local/bin/kubelet $KUBELET_KUBECONFIG_ARGS $KUBELET_CONFIG_ARGS $KUBELET_KUBEADM_ARGS $KUBELET_EXTRA_ARGS
+        mode: "0644"
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Enable kubelet service
+      ansible.builtin.systemd:
+        name: kubelet
+        enabled: yes

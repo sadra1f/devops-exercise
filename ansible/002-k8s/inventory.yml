@@ -1,0 +1,13 @@
+ubuntu_containers:
+  vars:
+    ansible_host: localhost
+    ansible_user: root
+    ansible_password: password
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+  hosts:
+    ubuntu-k8s-1:
+      ansible_port: 22022
+    ubuntu-k8s-2:
+      ansible_port: 22023
+    ubuntu-k8s-3:
+      ansible_port: 22024
